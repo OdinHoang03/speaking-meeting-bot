@@ -32,6 +32,15 @@ try:
     GOOGLE_AVAILABLE = True
 except ImportError:
     GOOGLE_AVAILABLE = False
+
+# Gemini Live speech-to-speech service (optional)
+try:
+    from pipecat.services.google.gemini_live import GeminiLiveLLMService
+    from pipecat.services.google.gemini_live.llm import GeminiLiveLLMSettings
+
+    GEMINI_LIVE_AVAILABLE = True
+except ImportError:
+    GEMINI_LIVE_AVAILABLE = False
 from pipecat.transports.websocket.client import (
     WebsocketClientParams,
     WebsocketClientTransport,
@@ -150,8 +159,15 @@ async def main(
     logger.info(f"Using bot ID: {bot_id}")
 
 
-    output_sample_rate = 24000 if streaming_audio_frequency == "24khz" else 16000
+    llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+
+    # Gemini Live outputs audio at 24kHz — force output sample rate
+    if llm_provider == "gemini-live":
+        output_sample_rate = 24000
+    else:
+        output_sample_rate = 24000 if streaming_audio_frequency == "24khz" else 16000
     vad_sample_rate = 16000
+    log_and_flush(logging.INFO, f"[CONFIG] LLM provider: {llm_provider}")
     log_and_flush(logging.INFO, f"[CONFIG] Audio frequency: {streaming_audio_frequency} (output: {output_sample_rate}, VAD: {vad_sample_rate})")
 
     print("Event loop set for Pipecat:", asyncio.get_running_loop())
@@ -216,138 +232,6 @@ async def main(
     voice_id = persona.get("cartesia_voice_id") or os.getenv("CARTESIA_VOICE_ID")
     log_and_flush(logging.INFO, f"[PERSONA] Using voice ID: {voice_id}")
 
-    tts_provider = os.getenv("TTS_PROVIDER", "cartesia").lower()
-    if tts_provider == "google" and GOOGLE_AVAILABLE:
-        google_tts_voice = persona.get("google_tts_voice", os.getenv("GOOGLE_TTS_VOICE", "Achernar"))
-        tts = GeminiTTSService(
-            api_key=os.getenv("GOOGLE_API_KEY"),
-            voice_id=google_tts_voice,
-            sample_rate=output_sample_rate,
-        )
-        log_and_flush(logging.INFO, f"[TTS] Gemini TTS initialized with sample_rate={output_sample_rate}, voice={google_tts_voice}")
-    elif tts_provider == "google" and not GOOGLE_AVAILABLE:
-        log_and_flush(logging.WARNING, "[TTS] Google TTS requested but pipecat[google] not installed, falling back to Cartesia")
-        tts = CartesiaTTSService(
-            api_key=os.getenv("CARTESIA_API_KEY"),
-            voice_id=voice_id,
-            sample_rate=output_sample_rate,
-            speed="normal",
-        )
-        log_and_flush(logging.INFO, f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}")
-    else:
-        tts = CartesiaTTSService(
-            api_key=os.getenv("CARTESIA_API_KEY"),
-            voice_id=voice_id,
-            sample_rate=output_sample_rate,
-            speed="normal",
-        )
-        log_and_flush(logging.INFO, f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}")
-
-    llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
-    if llm_provider == "google" and GOOGLE_AVAILABLE:
-        llm = GoogleLLMService(
-            api_key=os.getenv("GOOGLE_API_KEY"),
-            model=os.getenv("GOOGLE_LLM_MODEL", "gemini-2.0-flash"),
-        )
-        log_and_flush(logging.INFO, f"[LLM] Google Gemini LLM initialized with model={os.getenv('GOOGLE_LLM_MODEL', 'gemini-2.0-flash')}")
-    elif llm_provider == "google" and not GOOGLE_AVAILABLE:
-        log_and_flush(logging.WARNING, "[LLM] Google LLM requested but pipecat[google] not installed, falling back to OpenAI")
-        llm = OpenAILLMService(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            model="gpt-4-turbo-preview",
-            run_in_parallel=False,
-        )
-        log_and_flush(logging.INFO, "[LLM] OpenAI LLM initialized (fallback)")
-    else:
-        llm = OpenAILLMService(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            model="gpt-4-turbo-preview",
-            run_in_parallel=False,
-        )
-        log_and_flush(logging.INFO, "[LLM] OpenAI LLM initialized with model=gpt-4-turbo-preview")
-
-    # Only enable tools for non-Google LLM providers (OpenAI tools format is incompatible with GoogleLLMService)
-    if enable_tools and llm_provider != "google":
-        log_and_flush(logging.INFO, "[TOOLS] Registering function tools")
-        llm.register_function("get_weather", get_weather)
-        llm.register_function("get_time", get_time)
-
-        # Define function schemas
-        weather_function = FunctionSchema(
-            name="get_weather",
-            description="Get the current weather",
-            properties={
-                "location": {
-                    "type": "string",
-                    "description": "The city and state, e.g. San Francisco, CA",
-                },
-                "format": {
-                    "type": "string",
-                    "enum": ["celsius", "fahrenheit"],
-                    "description": "The temperature unit to use. Infer this from the users location.",
-                },
-            },
-            required=["location", "format"],
-        )
-
-        time_function = FunctionSchema(
-            name="get_time",
-            description="Get the current time for a specific location",
-            properties={
-                "location": {
-                    "type": "string",
-                    "description": "The location for which to retrieve the current time (e.g., 'Asia/Kolkata', 'America/New_York')",
-                },
-            },
-            required=["location"],
-        )
-
-        # Create tools schema
-        tools = ToolsSchema(standard_tools=[weather_function, time_function])
-    else:
-        if enable_tools and llm_provider == "google":
-            log_and_flush(logging.INFO, "[TOOLS] Function tools disabled for Google LLM (incompatible format)")
-        else:
-            log_and_flush(logging.INFO, "[TOOLS] Function tools are disabled")
-        tools = None
-
-    language = persona.get("language_code", "en-US")
-    log_and_flush(logging.INFO, f"[PERSONA] Using language: {language}")
-
-    stt_provider = os.getenv("STT_PROVIDER", "deepgram").lower()
-    if stt_provider == "google" and GOOGLE_AVAILABLE:
-        # Uses Application Default Credentials (gcloud auth application-default login)
-        google_credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        stt_kwargs = {
-            "sample_rate": output_sample_rate,
-        }
-        if google_credentials_path:
-            stt_kwargs["credentials_path"] = google_credentials_path
-        stt = GoogleSTTService(**stt_kwargs)
-        log_and_flush(logging.INFO, f"[STT] Google Cloud STT initialized with sample_rate={output_sample_rate}, language={language}")
-    elif stt_provider == "google" and not GOOGLE_AVAILABLE:
-        log_and_flush(logging.WARNING, "[STT] Google STT requested but pipecat[google] not installed, falling back to Deepgram")
-        stt = DeepgramSTTService(
-            api_key=os.getenv("DEEPGRAM_API_KEY"),
-            encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
-            sample_rate=output_sample_rate,
-            language=language,
-        )
-    else:
-        stt = DeepgramSTTService(
-            api_key=os.getenv("DEEPGRAM_API_KEY"),
-            encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
-            sample_rate=output_sample_rate,
-            language=language,
-        )
-        log_and_flush(logging.INFO, f"[STT] Deepgram STT initialized with sample_rate={output_sample_rate}, language={language}")
-    # stt = GladiaSTTService(
-    #     api_key=os.getenv("GLADIA_API_KEY"),
-    #     encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
-    #     sample_rate=output_sample_rate,
-    #     language=language,  # Use language from persona
-    # )
-
     bot_name = persona_name or "Bot"
     log_and_flush(logging.INFO, f"[BOT] Using bot name: {bot_name}")
 
@@ -362,44 +246,190 @@ async def main(
         system_content += "You are a meeting bot. You are in a meeting with a group of people. You are here to help the group. You are not the host of the meeting. You are not the organizer of the meeting. You are not the participant in the meeting. You are the meeting bot."
         system_content += "YOU ARE HELP TO HELP. KEEP IT SHORT. EVERYTHING YOU SAY WILL BE REPEATED BACK TO THE GROUP OUT LOUD so DO NOT add PUNCTUATION OR CAPS. JUST SAY WHAT YOU NEED TO SAY IN A CONCISE MANNER."
 
+    # ─── Gemini Live: speech-to-speech (S2S) pipeline ───
+    if llm_provider == "gemini-live":
+        if not GEMINI_LIVE_AVAILABLE:
+            log_and_flush(logging.ERROR, "[LLM] gemini-live requested but pipecat[google] not installed")
+            return
 
-    # Set up messages
-    messages = [
-        {
-            "role": "system",
-            "content": system_content,
-        },
-    ]
+        gemini_live_voice = persona.get(
+            "gemini_live_voice",
+            os.getenv("GEMINI_LIVE_VOICE", "Kore"),
+        )
+        gemini_live_model = os.getenv(
+            "GOOGLE_LIVE_MODEL",
+            "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        )
 
-    # Create the context object - with or without tools
-    if enable_tools and tools:
-        context = LLMContext(messages, tools=tools)
-    else:
+        gemini_live = GeminiLiveLLMService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            system_instruction=system_content,
+            settings=GeminiLiveLLMSettings(
+                model=gemini_live_model,
+                voice=gemini_live_voice,
+            ),
+        )
+        log_and_flush(logging.INFO, f"[LLM] Gemini Live S2S initialized (model={gemini_live_model}, voice={gemini_live_voice})")
+
+        # Set up messages & context (needed for context aggregator)
+        messages = [{"role": "system", "content": system_content}]
         context = LLMContext(messages)
+        aggregator_pair = LLMContextAggregatorPair(context)
 
-    # Create the context aggregator pair
-    aggregator_pair = LLMContextAggregatorPair(context)
+        pipeline = Pipeline([
+            transport.input(),
+            aggregator_pair.user(),
+            gemini_live,
+            transport.output(),
+            aggregator_pair.assistant(),
+        ])
 
-    # Get the user and assistant aggregators from the pair
-    user_aggregator = aggregator_pair.user()
-    assistant_aggregator = aggregator_pair.assistant()
+    # ─── Classic pipeline: separate STT → LLM → TTS ───
+    else:
+        tts_provider = os.getenv("TTS_PROVIDER", "cartesia").lower()
+        if tts_provider == "google" and GOOGLE_AVAILABLE:
+            google_tts_voice = persona.get("google_tts_voice", os.getenv("GOOGLE_TTS_VOICE", "Achernar"))
+            tts = GeminiTTSService(
+                api_key=os.getenv("GOOGLE_API_KEY"),
+                voice_id=google_tts_voice,
+                sample_rate=output_sample_rate,
+            )
+            log_and_flush(logging.INFO, f"[TTS] Gemini TTS initialized with sample_rate={output_sample_rate}, voice={google_tts_voice}")
+        elif tts_provider == "google" and not GOOGLE_AVAILABLE:
+            log_and_flush(logging.WARNING, "[TTS] Google TTS requested but pipecat[google] not installed, falling back to Cartesia")
+            tts = CartesiaTTSService(
+                api_key=os.getenv("CARTESIA_API_KEY"),
+                voice_id=voice_id,
+                sample_rate=output_sample_rate,
+                speed="normal",
+            )
+            log_and_flush(logging.INFO, f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}")
+        else:
+            tts = CartesiaTTSService(
+                api_key=os.getenv("CARTESIA_API_KEY"),
+                voice_id=voice_id,
+                sample_rate=output_sample_rate,
+                speed="normal",
+            )
+            log_and_flush(logging.INFO, f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}")
 
-    # Log pipeline step data
-    def log_pipeline_step(step_name, data):
-        log_and_flush(logging.INFO, f"[PIPELINE] Step: {step_name}, Type: {type(data)}, Data: {str(data)[:120]}")
+        if llm_provider == "google" and GOOGLE_AVAILABLE:
+            llm = GoogleLLMService(
+                api_key=os.getenv("GOOGLE_API_KEY"),
+                model=os.getenv("GOOGLE_LLM_MODEL", "gemini-2.0-flash"),
+            )
+            log_and_flush(logging.INFO, f"[LLM] Google Gemini LLM initialized with model={os.getenv('GOOGLE_LLM_MODEL', 'gemini-2.0-flash')}")
+        elif llm_provider == "google" and not GOOGLE_AVAILABLE:
+            log_and_flush(logging.WARNING, "[LLM] Google LLM requested but pipecat[google] not installed, falling back to OpenAI")
+            llm = OpenAILLMService(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model="gpt-4-turbo-preview",
+                run_in_parallel=False,
+            )
+            log_and_flush(logging.INFO, "[LLM] OpenAI LLM initialized (fallback)")
+        else:
+            llm = OpenAILLMService(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                model="gpt-4-turbo-preview",
+                run_in_parallel=False,
+            )
+            log_and_flush(logging.INFO, "[LLM] OpenAI LLM initialized with model=gpt-4-turbo-preview")
 
-    # Remove the LoggingStep wrapper - it doesn't properly proxy all methods
-    # Instead, we'll log in the pipeline components themselves if needed
-    
-    pipeline = Pipeline([
-        transport.input(),   # Add transport input to receive audio/data
-        stt,
-        user_aggregator,
-        llm,
-        tts,
-        assistant_aggregator,
-        transport.output(),  # Add transport output to send audio/data
-    ])
+        # Only enable tools for non-Google LLM providers (OpenAI tools format is incompatible with GoogleLLMService)
+        if enable_tools and llm_provider != "google":
+            log_and_flush(logging.INFO, "[TOOLS] Registering function tools")
+            llm.register_function("get_weather", get_weather)
+            llm.register_function("get_time", get_time)
+
+            # Define function schemas
+            weather_function = FunctionSchema(
+                name="get_weather",
+                description="Get the current weather",
+                properties={
+                    "location": {
+                        "type": "string",
+                        "description": "The city and state, e.g. San Francisco, CA",
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                        "description": "The temperature unit to use. Infer this from the users location.",
+                    },
+                },
+                required=["location", "format"],
+            )
+
+            time_function = FunctionSchema(
+                name="get_time",
+                description="Get the current time for a specific location",
+                properties={
+                    "location": {
+                        "type": "string",
+                        "description": "The location for which to retrieve the current time (e.g., 'Asia/Kolkata', 'America/New_York')",
+                    },
+                },
+                required=["location"],
+            )
+
+            # Create tools schema
+            tools = ToolsSchema(standard_tools=[weather_function, time_function])
+        else:
+            if enable_tools and llm_provider == "google":
+                log_and_flush(logging.INFO, "[TOOLS] Function tools disabled for Google LLM (incompatible format)")
+            else:
+                log_and_flush(logging.INFO, "[TOOLS] Function tools are disabled")
+            tools = None
+
+        language = persona.get("language_code", "en-US")
+        log_and_flush(logging.INFO, f"[PERSONA] Using language: {language}")
+
+        stt_provider = os.getenv("STT_PROVIDER", "deepgram").lower()
+        if stt_provider == "google" and GOOGLE_AVAILABLE:
+            google_credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            stt_kwargs = {
+                "sample_rate": output_sample_rate,
+            }
+            if google_credentials_path:
+                stt_kwargs["credentials_path"] = google_credentials_path
+            stt = GoogleSTTService(**stt_kwargs)
+            log_and_flush(logging.INFO, f"[STT] Google Cloud STT initialized with sample_rate={output_sample_rate}, language={language}")
+        elif stt_provider == "google" and not GOOGLE_AVAILABLE:
+            log_and_flush(logging.WARNING, "[STT] Google STT requested but pipecat[google] not installed, falling back to Deepgram")
+            stt = DeepgramSTTService(
+                api_key=os.getenv("DEEPGRAM_API_KEY"),
+                encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
+                sample_rate=output_sample_rate,
+                language=language,
+            )
+        else:
+            stt = DeepgramSTTService(
+                api_key=os.getenv("DEEPGRAM_API_KEY"),
+                encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
+                sample_rate=output_sample_rate,
+                language=language,
+            )
+            log_and_flush(logging.INFO, f"[STT] Deepgram STT initialized with sample_rate={output_sample_rate}, language={language}")
+
+        # Set up messages & context
+        messages = [{"role": "system", "content": system_content}]
+        if enable_tools and tools:
+            context = LLMContext(messages, tools=tools)
+        else:
+            context = LLMContext(messages)
+
+        aggregator_pair = LLMContextAggregatorPair(context)
+        user_aggregator = aggregator_pair.user()
+        assistant_aggregator = aggregator_pair.assistant()
+
+        pipeline = Pipeline([
+            transport.input(),
+            stt,
+            user_aggregator,
+            llm,
+            tts,
+            assistant_aggregator,
+            transport.output(),
+        ])
 
     task = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=True, check_dangling_tasks=True))
     runner = PipelineRunner()
