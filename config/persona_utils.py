@@ -80,6 +80,7 @@ class PersonaManager:
             "relevant_links": metadata.get("relevant_links", []),
             "language_code": metadata.get("language_code", ""),
             "google_tts_voice": metadata.get("google_tts_voice", ""),
+            "gemini_live_voice": metadata.get("gemini_live_voice", ""),
         }
 
     def load_additional_content(self, persona_dir: Path) -> str:
