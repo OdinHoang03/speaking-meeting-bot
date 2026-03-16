@@ -10,18 +10,29 @@ from dotenv import load_dotenv
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer, VADParams
-from pipecat.frames.frames import LLMMessagesFrame, TextFrame
+from pipecat.frames.frames import LLMMessagesUpdateFrame, TextFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.serializers.protobuf import ProtobufFrameSerializer
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.deepgram.stt import DeepgramSTTService
 
 # from pipecat.services.gladia.stt import GladiaSTTService
 from pipecat.services.openai.llm import OpenAILLMService
-from pipecat.transports.network.websocket_client import (
+
+# Google/Gemini services (optional)
+try:
+    from pipecat.services.google.tts import GeminiTTSService
+    from pipecat.services.google.stt import GoogleSTTService
+    from pipecat.services.google.llm import GoogleLLMService
+
+    GOOGLE_AVAILABLE = True
+except ImportError:
+    GOOGLE_AVAILABLE = False
+from pipecat.transports.websocket.client import (
     WebsocketClientParams,
     WebsocketClientTransport,
 )
@@ -116,10 +127,6 @@ async def main(
         websocket_url: Full WebSocket URL to connect to, including any path
         enable_tools: Whether to enable function tools like weather and time
     """
-    # Set TaskManager event loop FIRST, before any other pipecat operations
-    from pipecat.utils.asyncio import TaskManager
-    TaskManager.set_event_loop(TaskManager, asyncio.get_running_loop())
-    
     log_and_flush(logging.INFO, f"[STARTUP] MeetingBaas bot launching with persona: {persona_name}")
     load_dotenv()
 
@@ -209,22 +216,58 @@ async def main(
     voice_id = persona.get("cartesia_voice_id") or os.getenv("CARTESIA_VOICE_ID")
     log_and_flush(logging.INFO, f"[PERSONA] Using voice ID: {voice_id}")
 
-    tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
-        voice_id=voice_id,
-        sample_rate=output_sample_rate,
-        speed="normal",
-    )
-    log_and_flush(logging.INFO, f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}")
+    tts_provider = os.getenv("TTS_PROVIDER", "cartesia").lower()
+    if tts_provider == "google" and GOOGLE_AVAILABLE:
+        google_tts_voice = persona.get("google_tts_voice", os.getenv("GOOGLE_TTS_VOICE", "Achernar"))
+        tts = GeminiTTSService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            voice_id=google_tts_voice,
+            sample_rate=output_sample_rate,
+        )
+        log_and_flush(logging.INFO, f"[TTS] Gemini TTS initialized with sample_rate={output_sample_rate}, voice={google_tts_voice}")
+    elif tts_provider == "google" and not GOOGLE_AVAILABLE:
+        log_and_flush(logging.WARNING, "[TTS] Google TTS requested but pipecat[google] not installed, falling back to Cartesia")
+        tts = CartesiaTTSService(
+            api_key=os.getenv("CARTESIA_API_KEY"),
+            voice_id=voice_id,
+            sample_rate=output_sample_rate,
+            speed="normal",
+        )
+        log_and_flush(logging.INFO, f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}")
+    else:
+        tts = CartesiaTTSService(
+            api_key=os.getenv("CARTESIA_API_KEY"),
+            voice_id=voice_id,
+            sample_rate=output_sample_rate,
+            speed="normal",
+        )
+        log_and_flush(logging.INFO, f"[TTS] Cartesia TTS initialized with sample_rate={output_sample_rate}, voice_id={voice_id}")
 
-    llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        model="gpt-4-turbo-preview",
-        run_in_parallel=False,
-    )
-    log_and_flush(logging.INFO, f"[LLM] OpenAI LLM initialized with model=gpt-4-turbo-preview")
+    llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+    if llm_provider == "google" and GOOGLE_AVAILABLE:
+        llm = GoogleLLMService(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            model=os.getenv("GOOGLE_LLM_MODEL", "gemini-2.0-flash"),
+        )
+        log_and_flush(logging.INFO, f"[LLM] Google Gemini LLM initialized with model={os.getenv('GOOGLE_LLM_MODEL', 'gemini-2.0-flash')}")
+    elif llm_provider == "google" and not GOOGLE_AVAILABLE:
+        log_and_flush(logging.WARNING, "[LLM] Google LLM requested but pipecat[google] not installed, falling back to OpenAI")
+        llm = OpenAILLMService(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model="gpt-4-turbo-preview",
+            run_in_parallel=False,
+        )
+        log_and_flush(logging.INFO, "[LLM] OpenAI LLM initialized (fallback)")
+    else:
+        llm = OpenAILLMService(
+            api_key=os.getenv("OPENAI_API_KEY"),
+            model="gpt-4-turbo-preview",
+            run_in_parallel=False,
+        )
+        log_and_flush(logging.INFO, "[LLM] OpenAI LLM initialized with model=gpt-4-turbo-preview")
 
-    if enable_tools:
+    # Only enable tools for non-Google LLM providers (OpenAI tools format is incompatible with GoogleLLMService)
+    if enable_tools and llm_provider != "google":
         log_and_flush(logging.INFO, "[TOOLS] Registering function tools")
         llm.register_function("get_weather", get_weather)
         llm.register_function("get_time", get_time)
@@ -262,18 +305,42 @@ async def main(
         # Create tools schema
         tools = ToolsSchema(standard_tools=[weather_function, time_function])
     else:
-        log_and_flush(logging.INFO, "[TOOLS] Function tools are disabled")
+        if enable_tools and llm_provider == "google":
+            log_and_flush(logging.INFO, "[TOOLS] Function tools disabled for Google LLM (incompatible format)")
+        else:
+            log_and_flush(logging.INFO, "[TOOLS] Function tools are disabled")
         tools = None
 
     language = persona.get("language_code", "en-US")
     log_and_flush(logging.INFO, f"[PERSONA] Using language: {language}")
 
-    stt = DeepgramSTTService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
-        encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
-        sample_rate=output_sample_rate,
-        language=language,
-    )
+    stt_provider = os.getenv("STT_PROVIDER", "deepgram").lower()
+    if stt_provider == "google" and GOOGLE_AVAILABLE:
+        # Uses Application Default Credentials (gcloud auth application-default login)
+        google_credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        stt_kwargs = {
+            "sample_rate": output_sample_rate,
+        }
+        if google_credentials_path:
+            stt_kwargs["credentials_path"] = google_credentials_path
+        stt = GoogleSTTService(**stt_kwargs)
+        log_and_flush(logging.INFO, f"[STT] Google Cloud STT initialized with sample_rate={output_sample_rate}, language={language}")
+    elif stt_provider == "google" and not GOOGLE_AVAILABLE:
+        log_and_flush(logging.WARNING, "[STT] Google STT requested but pipecat[google] not installed, falling back to Deepgram")
+        stt = DeepgramSTTService(
+            api_key=os.getenv("DEEPGRAM_API_KEY"),
+            encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
+            sample_rate=output_sample_rate,
+            language=language,
+        )
+    else:
+        stt = DeepgramSTTService(
+            api_key=os.getenv("DEEPGRAM_API_KEY"),
+            encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
+            sample_rate=output_sample_rate,
+            language=language,
+        )
+        log_and_flush(logging.INFO, f"[STT] Deepgram STT initialized with sample_rate={output_sample_rate}, language={language}")
     # stt = GladiaSTTService(
     #     api_key=os.getenv("GLADIA_API_KEY"),
     #     encoding="linear16" if streaming_audio_frequency == "16khz" else "linear24",
@@ -306,13 +373,12 @@ async def main(
 
     # Create the context object - with or without tools
     if enable_tools and tools:
-        context = OpenAILLMContext(messages, tools)
+        context = LLMContext(messages, tools=tools)
     else:
-        context = OpenAILLMContext(messages)
+        context = LLMContext(messages)
 
-    # Get the context aggregator pair using the LLM's method
-    # This handles properly setting up the context aggregators
-    aggregator_pair = llm.create_context_aggregator(context)
+    # Create the context aggregator pair
+    aggregator_pair = LLMContextAggregatorPair(context)
 
     # Get the user and assistant aggregators from the pair
     user_aggregator = aggregator_pair.user()
@@ -358,7 +424,7 @@ async def main(
             log_and_flush(logging.INFO, "[BOT] Waiting 2 seconds before sending initial message")
             await asyncio.sleep(2)
             log_and_flush(logging.INFO, f"[BOT] Queuing initial message: {initial_message}")
-            await task.queue_frames([LLMMessagesFrame([initial_message])])
+            await task.queue_frames([LLMMessagesUpdateFrame(messages=[initial_message], run_llm=True)])
             log_and_flush(logging.INFO, "[BOT] Initial greeting message queued successfully")
             
             # Also queue a simple TTS test

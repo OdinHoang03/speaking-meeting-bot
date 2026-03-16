@@ -27,8 +27,10 @@ pipecat_ws_logger.setLevel(logging.WARNING)
 
 async def api_key_middleware(request: Request, call_next):
     """Middleware to check for MeetingBaas API key in headers."""
-    # Skip API key check for docs and openapi endpoints
-    if request.url.path in ["/docs", "/openapi.json", "/redoc"]:
+    # Skip API key check for docs, openapi, and WebSocket endpoints
+    if request.url.path in ["/docs", "/openapi.json", "/redoc", "/health"]:
+        return await call_next(request)
+    if request.url.path.startswith("/ws/") or request.url.path.startswith("/pipecat/"):
         return await call_next(request)
 
     api_key = request.headers.get("x-meeting-baas-api-key")

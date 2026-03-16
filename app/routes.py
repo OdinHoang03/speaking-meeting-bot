@@ -1,6 +1,7 @@
 """API routes for the Speaking Meeting Bot application."""
 
 import asyncio
+import os
 import uuid
 from datetime import datetime
 from io import BytesIO
@@ -84,15 +85,16 @@ async def join_meeting(request: BotRequest, client_request: Request):
     logger.info(f"WebSocket URL: {websocket_url}")
     logger.info(f"Bot name: {request.bot_name}")
 
-    # INTERNAL PARAMETER: Set a fixed value for streaming_audio_frequency
-    # This is not exposed in the API and is always "16khz"
-    streaming_audio_frequency = "16khz"
-    logger.info(f"Using fixed streaming audio frequency: {streaming_audio_frequency}")
+    # INTERNAL PARAMETER: Set streaming audio frequency based on TTS provider
+    # Google TTS requires 24khz, Cartesia/Deepgram use 16khz
+    tts_provider = os.getenv("TTS_PROVIDER", "cartesia").lower()
+    streaming_audio_frequency = "24khz" if tts_provider == "google" else "16khz"
+    logger.info(f"Using streaming audio frequency: {streaming_audio_frequency} (TTS provider: {tts_provider})")
 
-    # Set the converter sample rate based on our fixed streaming_audio_frequency
+    # Set the converter sample rate based on streaming_audio_frequency
     from core.converter import converter
 
-    sample_rate = 16000  # Always 16000 Hz for 16khz audio
+    sample_rate = 24000 if streaming_audio_frequency == "24khz" else 16000
     converter.set_sample_rate(sample_rate)
     logger.info(
         f"Set audio sample rate to {sample_rate} Hz for {streaming_audio_frequency}"
@@ -314,7 +316,8 @@ async def join_meeting(request: BotRequest, client_request: Request):
 
         # Start the Pipecat process as a subprocess
         # The Pipecat process should connect to our LOCAL WebSocket server, not the external one
-        pipecat_websocket_url = f"ws://localhost:7014/pipecat/{bot_client_id}"
+        server_port = os.getenv("PORT", "7014")
+        pipecat_websocket_url = f"ws://localhost:{server_port}/pipecat/{bot_client_id}"
         process = start_pipecat_process(
             client_id=bot_client_id,
             websocket_url=pipecat_websocket_url,  # Use internal URL, not external

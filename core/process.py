@@ -84,7 +84,8 @@ def start_pipecat_process(
     # Start the process
     process = subprocess.Popen(
         command,
-        env=os.environ.copy(),  # Copy the current environment
+        cwd=os.path.join(os.path.dirname(__file__), ".."),
+        env={**os.environ.copy(), "PYTHONPATH": os.path.join(os.path.dirname(__file__), "..")},
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,  # Capture output as text

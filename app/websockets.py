@@ -1,3 +1,4 @@
+import os
 """WebSocket routes for the Speaking Meeting Bot API."""
 
 import asyncio
@@ -65,7 +66,8 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
             logger.info(f"Pipecat process already running for client {internal_client_id}")
         else:
             # Start Pipecat process if not already running
-            pipecat_websocket_url = f"ws://localhost:7014/pipecat/{internal_client_id}"
+            server_port = os.getenv("PORT", "7014")
+            pipecat_websocket_url = f"ws://localhost:{server_port}/pipecat/{internal_client_id}"
             process = start_pipecat_process(
                 client_id=internal_client_id,
                 websocket_url=pipecat_websocket_url,

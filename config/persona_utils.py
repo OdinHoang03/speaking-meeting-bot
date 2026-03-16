@@ -78,6 +78,8 @@ class PersonaManager:
             "cartesia_voice_id": metadata.get("cartesia_voice_id", ""),
             "gender": metadata.get("gender", ""),
             "relevant_links": metadata.get("relevant_links", []),
+            "language_code": metadata.get("language_code", ""),
+            "google_tts_voice": metadata.get("google_tts_voice", ""),
         }
 
     def load_additional_content(self, persona_dir: Path) -> str:
